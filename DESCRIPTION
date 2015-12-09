@@ -1,0 +1,10 @@
+Package: tdsm
+Title: Templated Deterministic Statistical Machines
+Version: 0.1
+Authors@R: "Prasad Patil <prpatil42@gmail.com> [aut, cre], Jeff Leek <jtleek@gmail.com> [aut]"
+Description: Analysis templates which can be edited and differentiated. The intention is to automate certain analyses and understand how changes to parameters and procuedre affect results.
+Depends: R (>= 3.1.1), rpart, pROC, knitr, rmarkdown, knitrBootstrap, rattle, httr, htmlwidgets, rjson, diffr
+License: >GPL-2
+LazyData: true
+Suggests: knitr
+VignetteBuilder: knitr

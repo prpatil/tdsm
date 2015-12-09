@@ -1,0 +1,93 @@
+---
+title: "tdsm Development Vignette"
+author: "Prasad Patil"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+Developing a template for the tdsm package
+------------------------------------------
+
+# Introduction
+
+Creating your own templated deterministic statistical machine is fairly straightforward. We suggest that you fork the github repository 
+(https://github.com/prpatil/tdsm). Then you can supply your analysis components and make a pull request for us to include into the main branch.
+
+We provide a generic template in the /inst folder of the package which you can use and modify. The arrangement of your analysis is purely up 
+to you, but we recommend placing any parameter choices in an initialization code chunk. Also, please name your template in the form "[name]_template.Rmd". 
+This will make it easier to call the template from R.
+
+There are two requirements in the template:
+
+(1) When accessing data, please assume that data will be passed as a list. E.g., if you have training data, refer to it as "data$training".
+(2) If you would like to return anything to the user directly in R, add it to a list called "return_elements". This list will be passed back 
+to the user after the report is knitted.
+
+After the template is written, please create a wrapper function called "[name]_report.R". We show "tspreg_report.R" below to illustrate the structure of this 
+function:
+
+```{r tspreg, eval = F}
+tspreg_report <- function(path=NULL, train, outcome, covar=NULL, val=NULL, val_outcome=NULL, val_covar=NULL, title="Example", seed=47209){
+
+	# A variety of input checks
+	if(!is.matrix(train) | !is.vector(outcome)){
+		stop("Please ensure that your training data is in matrix form and your outcome is a vector")
+	}
+
+	if(ncol(train) != length(outcome)){
+		stop("Number of subjects in training matrix and outcome vector do not match")
+	}
+
+	if(!is.null(covar)){
+		if(!is.data.frame(covar)){
+			stop("Covariate set must be a data frame")
+		} else if(nrow(covar) != ncol(train)){
+			stop("Number of subjects in covariate set and training matrix do not match")
+		}
+	}
+
+	if(!is.null(val)){
+		if(!is.matrix(val) | !is.vector(val_outcome)){
+					stop("Please ensure that your validation data is in matrix form and your validation outcome is a vector")
+		}
+
+		if(ncol(val) != length(val_outcome)){
+			stop("Number of subjects in validation matrix and validation outcome vector do not match")
+		}
+
+		if(!is.null(val_covar)){
+			if(!is.data.frame(val_covar)){
+				stop("Validation covariate set must be a data frame")
+			} else if(nrow(val_covar) != ncol(val)){
+				stop("Number of subjects in validation covariate set and validation matrix do not match")
+			}
+		}
+	}
+	
+	if(is.null(path)){
+		path <- system.file("tsp_template.Rmd", package="tdsm")
+	}
+
+	data <- list("train" = train, "outcome" = outcome, "covar" = covar, "val" = val, "val_outcome" = val_outcome, "val_covar" = val_covar)	
+	# Pass everything to a generic report-running function
+	return_elements <- build_report(path, data=data, title=title, seed=seed)	
+
+	return_elements
+}
+```
+
+This function has a generic input structure of: function(path=NULL, data, title="Example", seed=47209). We need the "path" variable in case the 
+user has decided to edit and re-run the analysis. "data" can be one or multiple variables (above, we have split into "train", "outcome", "covar", etc.). We
+also allow the user to set a title and a random seed for the analysis.
+
+Within the function, all we do is check that the data are in an expected format, then add it to a list called "data". If the "path" variable is NULL (defualt),
+then we find the path to the default template. All of this input is passed to the worker function "build_report". This is the engine that will produce the 
+HTML report.
+
+If you have additional functions that your template calls, we suggest that you add them all to a file called "[name]_utils.R" and do not export them. The 
+"[name]_report" function is the only one that the user should see. Please use the roxygen2 format to document all R functions, regardless of whether or not 
+they are exported to the user.

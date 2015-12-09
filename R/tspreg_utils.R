@@ -1,0 +1,310 @@
+#'
+#' Utility/convenience functions
+#'
+#'
+#' Make pairs out of two vectors of rownames (convenience function
+#' to be used with empirical_controls.R)
+#'
+#' This function creates a pair matrix using specifically-provided row names.
+#'
+#' @param rn_min Rownames for group 1
+#' @param rn_max Rownames for group 2
+#' @param mat Expression matrix (NOTE: must have rownames)
+#' @param n Length of rn_min and rn_max
+#'
+#' @return A matrix of dimension n*n with pairs generated for
+#' every comparision in rn_min to rn_max.
+
+make_pairs <- function(rn_min, rn_max, mat, n){
+        tmp <- matrix(NA, n*n, ncol(mat))
+        rn_tmp <- vector("character", n*n)
+        for(j in 1:length(rn_max)){
+                for(k in 1:length(rn_min)){
+                        tmp[(n*(j-1) + k),] <- mat[rn_min[k],] < mat[rn_max[j],]
+                        rn_tmp[(n*(j-1) + k)] <- paste0(rn_min[k], "<", rn_max[j])
+                }
+        }
+        tmp <- ifelse(tmp, 1, 0)
+        rownames(tmp) <- rn_tmp
+        tmp
+}
+
+#' 
+#' Build individual pairs based on rownames
+#' 
+#' A convenience function to quickly build a small matrix of pairs. Used
+#' when we want to predict on a validation set.
+#'
+#' @param pair A single pairname "A<B", where "A" and "B" are valid rownames.
+#' @param mat A matrix with rownames that contain all "A<B" pairs.
+#' 
+#' @return A vector of 0's and 1's corresponding to the pair "A<B" we want
+#' 
+
+single_pairs <- function(pair, mat){
+	names <- unlist(strsplit(pair, "<"))
+	if(!(names[1] %in% rownames(mat)) | !(names[2] %in% rownames(mat))){
+		rep(NA, ncol(mat))	
+	} else {
+		ifelse(mat[names[1],] - mat[names[2],] < 0, 1, 0)
+	}
+}
+
+#'
+#' Empirical controls calculation function
+#'
+#' Generate candidate top-scoring pairs (TSPs) by finding "empirical
+#' control" genes within quantiles of the data.
+#'
+#' @param exprs An p x m input matrix of gene expression values with p genes and m samples. This matrix MUST have rownames.
+#' @param n Number of pairs to create within each quantile bin (default 40)
+#' @param q Number of quantiles desired (default 4)
+#'
+#' @details We intend to use TSPs as the features in our gene signature. Examining all features
+#' would require generating $p$ choose 2 comparisons, most of which would be uninformative. We prioritize
+#' the creation of features where one gene is expressed at a constant level across classes and the other
+#' gene is expressed high and low across classes. To unearth pairs that behave like this, we rank all
+#' genes by their average expression and break them into quantile groups. We then rank all genes within
+#' each group by their variance and compute comparisons between the top $n$ most variable and least variable genes.
+#' The result of this function provides a matrix of size $(n*q)$ x $m$, where each row is a binary vector indicating
+#' the value of I($g_1 > g_2$) for two selected.
+#'
+#' @return A (n*q) x m matrix with TSPs in rows and samples in columns
+
+empirical_controls = function(exprs, n=40, q=4){
+  if(is.null(rownames(exprs))){
+	stop("Input data matrix needs rownames.")
+  }
+
+  gm <- cbind(rowMeans(exprs), apply(exprs,1,sd))
+  qt <- quantile(gm[,1], na.rm=T, probs=seq(0,1,length.out=q+1)) # Get cut points
+  all_pairs <- all_min <- all_max <- c()
+  
+  for(i in 1:(length(qt)-1)){
+    # Get the ith quantile subset and operate within it
+    sub <- gm[which(gm[,1] >= qt[i] & gm[,1] < qt[i+1]),]
+    rn <- rownames(sub)
+    sd_ord <- order(sub[,2], sub[,1])
+    rn_min <- rn[head(sd_ord, n)]
+    rn_max <- rn[tail(sd_ord, n)]
+    
+    all_pairs <- rbind(all_pairs, make_pairs(rn_min, rn_max, exprs, n))
+  }	
+  
+  all_pairs
+}
+
+#' 
+#' Calculate f-statistics quickly
+#' 
+#' Using matrix algebbra, quickly calculate
+#' f statistics for comparing nested models
+#' 
+#' @param dat An input data set
+#' @param mod The model matrix for the alternative model to be fit
+#' @param mod0 The model matrix for the null model to be fit. If NULL, the null model
+#' is the model with only an intercept. 
+#' 
+#' @return fstats A vector of f-statistics
+#' 
+
+
+fstats <- function(dat,mod,mod0=NULL){
+  
+  n <- dim(dat)[2]
+  m <- dim(dat)[1]
+  
+  if(is.null(mod0)){
+    mod0 <- cbind(rep(1,n))
+  }
+  
+  df1 <- dim(mod)[2]
+  df0 <- dim(mod0)[2]
+  p <- rep(0,m)
+  Id <- diag(n)
+  
+  resid <- dat %*% (Id - mod %*% solve(t(mod) %*% mod) %*% t(mod))
+  rss1 <- rowSums(resid*resid)
+  rm(resid)
+  #gc()
+  
+  resid0 <- dat %*% (Id - mod0 %*% solve(t(mod0) %*% mod0) %*% t(mod0))
+  rss0 <- rowSums(resid0*resid0)
+  rm(resid0)
+  #gc()
+  
+  fstats <- ((rss0 - rss1)/(df1-df0))/(rss1/(n-df1))
+  rm(rss0,rss1)
+  #gc()
+  return(fstats)
+}
+
+#' 
+#' Regression-based feature selection
+#' 
+#' Leverages the fact that the F-statistic for y~x and
+#' x~y is the same to quickly choose pairs that add conditional
+#' value for predicting an outcome. Also runs a separate pair-on-pair
+#' regression to eliminate collinear pairs. 
+#' 
+#' @param pairmat An m x n matrix of pairwise features with rows=features, columns=samples
+#' (generated by empirical control feature selection)
+#' @param outcome A vector of outcomes of length n
+#' @param covar An optional n x p matrix of additional covariates to adjust for
+#' @param npair The number of paris we wish to select
+#'
+#' @details This function takes the output from empirical_controls.R and reduces it
+#' to a set of pairs of size "npairs" that are predictive of the outcome of interest.
+#' The paris are chosen conditionally so that the next pair chosen adds predictive
+#' ability additional to the pairs that have already been chosen. At each step,
+#' we consider a regression of
+#' 
+#' @return pairs A vector with the index for each chosen pair
+#' 
+
+reg_fs <- function(pairmat, outcome, covar=NULL, npair=5){
+	# Tolerance for testing residuals
+	tol <- 1e-10
+	# Covariates are always accounted for
+	if(!is.null(covar)){
+		if(nrow(covar) != ncol(pairmat)){
+			stop("covar and pairmat must have agreeing dimensions.")
+		}
+		outmat <- cbind(outcome, covar)
+	} else {
+		outmat <- cbind(outcome)
+	}
+
+	if(ncol(pairmat) != length(outcome)){
+		stop("pairmat and outcome must have agreeing dimensions.")
+	}
+	
+	tpm <- pairmat # temp copy
+	pairs <- vector("integer", npair)
+	# Initial step is for best overall pair
+	mod0 <- cbind(rep(1, length(outcome)))
+	mod <- cbind(mod0, outmat)
+	idx <- 1:nrow(tpm)
+	
+	for(i in 1:npair){
+		# Get F-statistic for every remaining pair
+		fs <- fstats(tpm, mod, mod0)
+		cur <- which.max(fs)
+		mod0 <- cbind(mod0, tpm[cur,])
+		mod <- cbind(mod, tpm[cur,])
+		pairs[i] <- idx[cur]
+		# Get residuals for regressing all remaining pairs on all chosen features
+		res <- apply(tpm, 1, function(y){sum((lm.fit(mod0, y)$residuals)^2)})
+		# Need to dump this and all identical rows
+		#all_cur <- which(apply(tpm, 1, function(x){all(x == tpm[cur,])}))
+		all_cur <- which(res < tol)
+		tpm <- tpm[-all_cur,]
+		idx <- idx[-all_cur]		
+	}
+
+	pairs	
+}
+
+#'
+#' Build and cross-validate a TSP-based model
+#'
+#' This function takes training/test data and pairs generated via empirical control feature
+#' selection and builds a decision tree model. It also cross-validates to get an out-of-sample
+#' accuracy estimate
+#'
+#' @param train p x n training data matrix
+#' @param train_outcome Outcome data of length n
+#' @param train_covar n x q additional covariates for training data (optional)
+#' @param pairs r x n matrix of TSP generated via empirical controls
+#' @param test p x m test data matrix, where p columns and column names match up with train
+#' @param test_covar m x s additional covariates for training data (necessary if train_covar specified; column names must match)
+#' @param npair Number of pairs desired in the model
+#' @param predtype Type of predictions to make - "class" if initial outcome is factor, "vector" if initial outcome is non-factor
+#'
+#' @details This is a wrapper for a series of model-building steps. The main output of
+#' this function is the TSP decision tree model. We incorporate a second
+#' feature selection step (after empirical controls, done separately) that chooses
+#' from the candidate pairs. Pairs are chosen based on how much additional predictive
+#' value they provide on top of pairs already selected (and non-pair covariates, if specified).
+#' We also cross-validate this entire procedure five times to get an estimate of
+#' out-of-sample accuracy of our model.
+#'
+#' @return A list contaiing the following attributes:
+#'	\item{tree}{The final decision tree built on training data}
+#'	\item{p_train}{Model predictions on training data}
+#'	\item{p_test}{Model predictions on test data}
+#'	\item{final_names}{Pair names in final model}
+#'	\item{pair_names}{Pair name aliases for pretty tree printing}
+#'	\item{acc}{Out-of-sample accuracy calculated via cross-validation}
+#'
+
+
+
+tsp_model_builder <- function(train, train_outcome, train_covar, pairs, test, test_covar, npair, predtype){
+
+	ncv <- 5 # no. cross validation folds
+	idxs <- split(sample(1:ncol(train)), rep(1:ncv, each=ncol(train)/ncv))
+	acc <- vector("numeric", ncv)
+
+	# we're going to get an out-of-sample accuracy measure via CV
+	for(i in 1:ncv){
+      	  idx <- idxs[[i]]
+	        ktrain <- pairs[,-idx]
+      	  ktest <- pairs[,idx]
+	        ktrain_outcome <- train_outcome[-idx]
+      	  ktest_outcome <- train_outcome[idx]
+	        if(!is.null(train_covar)){
+      	          ktrain_covar <- train_covar[-idx,]
+            	    ktest_covar <- train_covar[idx,]
+	        } else {
+      	          ktrain_covar <- ktest_covar <- train_covar # All null
+	        }
+
+	        # Now that we have a subset, need to again check which pairs do not flip
+	        rmp <- which(rowMeans(ktrain) == 1 | rowMeans(ktrain) == 0)
+	        if(length(rmp) > 0){
+      	          ktrain <- ktrain[-rmp,]
+            	    ktest <- ktest[-rmp,]
+	        }
+
+	        # Do regression feature selection on ktrain
+	        cp <- reg_fs(ktrain, ktrain_outcome, ktrain_covar, npair)
+
+	        tmp_train_data <- as.data.frame(cbind(ktrain_covar, t(ktrain[cp,])))
+	        tree <- rpart(ktrain_outcome~., data = tmp_train_data)
+	        tree <- prune(tree, cp=tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"])
+		    tmp_test_data <- as.data.frame(cbind(ktest_covar,t(ktest[cp,])))
+	        preds <- predict(tree, newdata=tmp_test_data, type=predtype)
+
+      	    if(predtype == "class"){
+				acc[i] <- sum(preds == ktest_outcome)/length(ktest_outcome)
+			} else {
+				acc[i] <- mean((ktest_outcome - preds)^2)
+			}
+	}
+
+	# Now we build the overall model on the whole data
+	cp_final <- reg_fs(pairs, train_outcome, train_covar, npair)
+	pairtmp <- as.data.frame(cbind(train_covar, t(pairs[cp_final,])))
+	final_names <- c(colnames(train_covar), rownames(pairs[cp_final,]))
+	pair_names <- c(colnames(train_covar), paste0("p", 1:npair))
+
+	tree <- rpart(train_outcome~., data=pairtmp)
+	tree <- prune(tree, cp=tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"])
+
+	colnames(pairtmp) <- pair_names
+
+	display_tree <- rpart(train_outcome~., data=pairtmp)
+	display_tree <- prune(display_tree, cp=tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"])
+
+	p_train <- predict(tree, type=predtype)
+
+	test_dm <- as.data.frame(cbind(test_covar, sapply(final_names, single_pairs, test)))
+	#colnames(test_dm) <- pair_names
+
+	p_test <- predict(tree, newdata=test_dm, type=predtype)
+
+	list("tree"=tree, "display_tree"=display_tree, "p_train"=as.numeric(p_train), "p_test"=as.numeric(p_test), "final_names"=final_names, "pair_names"=pair_names, "acc"
+=acc)
+
+}
